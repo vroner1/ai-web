@@ -38,7 +38,7 @@ class User(Base):
         lazy="selectin",
     )
 
-    chat_history: Mapped[list["ChatHistory"]] = relationship(
+    sessions: Mapped[list["ChatSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         lazy="selectin",
@@ -80,11 +80,9 @@ class ChatHistory(Base):
         JSONB, nullable=False, default=dict, comment="Extra generation metadata."
     )
 
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(),
-        ForeignKey("user.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+    session_id: Mapped[uuid.UUID] = mapped_column(
+    UUID(), ForeignKey("chat_session.id", ondelete="CASCADE"),
+    nullable=False, index=True, comment="Chat session id."
     )
 
     api_key_id: Mapped[Optional[int]] = mapped_column(
@@ -103,6 +101,7 @@ class ChatHistory(Base):
 
     user: Mapped[Optional["User"]] = relationship(back_populates="chat_history")
     api_key: Mapped[Optional["APIKey"]] = relationship(back_populates="chat_history")
+    session: Mapped["ChatSession"] = relationship(back_populates="chat_history")
 
 
 class APIKey(Base):
@@ -136,5 +135,38 @@ class APIKey(Base):
 
     chat_history: Mapped[list["ChatHistory"]] = relationship(
         back_populates="api_key",
+        lazy="selectin",
+    )
+
+class ChatSession(Base):
+    __tablename__ = "chat_session"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(),
+        primary_key=True,
+        default=uuid.uuid4,
+        comment="Primary key."
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        comment="Owner user id."
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False),
+        default=datetime.utcnow,
+        index=True,
+        comment="Chat session creation date."
+    )
+
+    user: Mapped["User"] = relationship(back_populates="sessions")
+
+    chat_history: Mapped[list["ChatHistory"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
         lazy="selectin",
     )

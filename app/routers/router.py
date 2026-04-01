@@ -25,7 +25,7 @@ import app.main as main_app
 from app.config import get_settings
 from app.database.database import get_db
 from app.ml_model.ml_model import MockLLM
-from app.models.models import APIKey, ChatHistory, User
+from app.models.models import APIKey, ChatHistory, ChatSession, User
 from app.schemas.schemas import (
     APIKeyCreatedResponse,
     APIKeyCreateRequest,
@@ -33,10 +33,13 @@ from app.schemas.schemas import (
     ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
+    ChatSessionResponse,
     HealthResponse,
     UserCreateRequest,
     UserResponse,
 )
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +268,20 @@ async def chat(
 
     if len(user_prompt) > settings.MAX_PROMPT_LENGTH:
         raise main_app.ContextLengthExceeded(settings.MAX_PROMPT_LENGTH)
+    
+    result = await db.execute(
+    select(ChatSession).where(
+        ChatSession.id == request.session_id,
+        ChatSession.user_id == api_key.owner_id,
+    )
+    )
+    session = result.scalar_one_or_none()
+
+    if session is None:
+        raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Chat session not found.",
+    )
 
     response_text = await model.generate(
         prompt=user_prompt,
@@ -273,16 +290,17 @@ async def chat(
     )
 
     chat_entry = ChatHistory(
-        user_id=api_key.owner_id,
-        api_key_id=api_key.id,
-        messages=[message.model_dump() for message in request.messages],
-        user_prompt=user_prompt,
-        assistant_prompt=response_text,
-        temperature=request.temperature,
-        max_tokens=request.max_tokens,
-        streamed=False,
-        response_metadata=build_chat_metadata(request, model, streamed=False),
+    session_id=request.session_id,
+    api_key_id=api_key.id,
+    messages=[message.model_dump() for message in request.messages],
+    user_prompt=user_prompt,
+    assistant_prompt=response_text,
+    temperature=request.temperature,
+    max_tokens=request.max_tokens,
+    streamed=False,
+    response_metadata=build_chat_metadata(request, model, streamed=False),
     )
+
     db.add(chat_entry)
     await db.commit()
     await db.refresh(chat_entry)
@@ -296,7 +314,7 @@ async def chat(
 
     return ChatResponse(
         id=chat_entry.id,
-        user_id=api_key.owner_id,
+        user_id=api_key.session_id,
         response=response_text,
         temperature=chat_entry.temperature,
         max_tokens=chat_entry.max_tokens,
@@ -316,6 +334,20 @@ async def chat_streaming(
 
     if len(user_prompt) > settings.MAX_PROMPT_LENGTH:
         raise main_app.ContextLengthExceeded(settings.MAX_PROMPT_LENGTH)
+    
+    result = await db.execute(
+    select(ChatSession).where(
+        ChatSession.id == request.session_id,
+        ChatSession.user_id == api_key.owner_id,
+    )
+    )
+    session = result.scalar_one_or_none()
+
+    if session is None:
+        raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Chat session not found.",
+    )
 
     async def stream_response():
         collected_tokens: list[str] = []
@@ -328,7 +360,7 @@ async def chat_streaming(
             yield token
 
         chat_entry = ChatHistory(
-            user_id=api_key.owner_id,
+            user_id=api_key.session_id,
             api_key_id=api_key.id,
             messages=[message.model_dump() for message in request.messages],
             user_prompt=user_prompt,
@@ -344,3 +376,44 @@ async def chat_streaming(
         schedule_chat_audit(chat_entry.id, api_key.owner_id, streamed=True)
 
     return StreamingResponse(stream_response(), media_type="text/plain")
+
+@router.post(
+    "/users/{user_id}/sessions",
+    response_model=ChatSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["chat"],
+)
+async def create_chat_session(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(get_current_api_key),
+) -> ChatSession:
+    await get_user_or_404(user_id, db)
+    ensure_user_access(user_id, api_key)
+
+    session = ChatSession(user_id=user_id)
+    db.add(session)
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+@router.get(
+    "/users/{user_id}/sessions",
+    response_model=list[ChatSessionResponse],
+    tags=["chat"],
+)
+async def get_user_sessions(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    api_key: APIKey = Depends(get_current_api_key),
+) -> list[ChatSession]:
+    await get_user_or_404(user_id, db)
+    ensure_user_access(user_id, api_key)
+
+    result = await db.execute(
+        select(ChatSession)
+        .where(ChatSession.user_id == user_id)
+        .order_by(desc(ChatSession.created_at))
+    )
+    sessions = result.scalars().all()
+    return sessions
